@@ -1,60 +1,113 @@
 # Blood Culture Early Alert Agent
 
-Clinical microbiology tool for blood culture interpretation including time-to-positivity analysis, contamination assessment, Gram stain interpretation, and antibiotic escalation guidance.
+> **Domain:** Infectious Disease Surveillance & Microbiology  
+> **Reference Guidelines & Standards:** `CLSI M100, EUCAST & CDC NHSN Clinical Standards`
 
-## Features
+<div align="center">
 
-- **Time-to-Positivity (TTP) Interpretation**:
-  - Rapid growth (<12h): High bacterial burden, consider endocarditis
-  - Normal growth (12-36h): Standard bacteremia
-  - Slow growth (>36h): Possible contaminant or low-grade bacteremia
-- **Contamination Assessment**:
-  - Known contaminant database (CoNS, Corynebacterium, Propionibacterium, Bacillus, Micrococcus)
-  - True pathogen database (S. aureus, E. coli, Klebsiella, Pseudomonas, Enterococcus, Candida)
-  - Multi-factor probability calculation (organism, TTP, bottle positivity)
-- **Gram Stain Interpretation**: Expected organisms and empiric therapy guidance
-- **Antibiotic Escalation Triggers**: Organism, resistance, and host factor-based
-- **Repeat Blood Culture Recommendations**: Per organism-specific guidelines
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-3776AB.svg?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688.svg?logo=fastapi&logoColor=white)
+![Audit Trail](https://img.shields.io/badge/Audit-HMAC--SHA256_Tamper--Evident-brightgreen.svg)
+![Zero-PHI Guard](https://img.shields.io/badge/Guard-Zero--PHI_Outbound-blue.svg)
+![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker&logoColor=white)
 
-## Quick Start
+</div>
+
+---
+
+## 📖 What It Does
+
+**Blood Culture Early Alert Agent** is an advanced analytical and computational platform implementing Time-to-Positivity & True Pathogen vs Contaminant Arbiter.
+
+Antimicrobial De-escalation Trigger for BloodCulture Sentinel.
+Analyzes culture and sensitivity results to recommend antimicrobial
+de-escalation, step-down therapy, or continuation based on clinical guidelines.
+
+---
+
+## ⚙️ Key Capabilities & Algorithmic Modules
+
+### 🔬 Core Algorithmic & Evaluation Engines
+
+- **`SensitivityResult`**: Antibiotic susceptibility result.
+- **`DeescalationContext`**: Clinical context for de-escalation decision.
+- **`DeescalationTriggerAgent`**: Sub-agent for antimicrobial de-escalation decision support.
+- **`MaldiTofResult`**: Represents a MALDI-TOF identification result.
+- **`MaldiTofAgent`**: Sub-agent for MALDI-TOF identification integration with TTP analysis.
+- **`CultureCase`** — dedicated module for culture case evaluation and state verification.
+
+---
+
+## 📐 Mathematical Formulation & Logic
+
+```text
+  Calculate contamination probability
+  self.score = score
+  score = 0.0
+```
+
+---
+
+## 💻 CLI Quickstart & Usage
+
+### 1. Guided Interactive Mode
+```bash
+python cli.py
+```
+
+### 2. Direct Parameterized Evaluation
+```bash
+python cli.py --input data.csv
+```
+
+### Parameter Reference
+- `--interactive`: Launch guided terminal interactive wizard.
+- `--input <path>`: Evaluate input from JSON or CSV specification.
+- `--json`: Output deterministic structured results in JSON format.
+
+### Input Data Schema
+
+| Field | Description | Requirement |
+|:------|:------------|:------------|
+| `case_id` | Parameter / observation metric | Required |
+| `patient_synthetic_id` | Parameter / observation metric | Required |
+| `metric_primary` | Parameter / observation metric | Required |
+| `metric_secondary` | Parameter / observation metric | Required |
+| `is_stat` | Parameter / observation metric | Required |
+| `status_flag` | Parameter / observation metric | Required |
+
+---
+
+## 🛡️ Security & Enterprise Architecture
+
+* **Zero-PHI Outbound Interceptor:** Active AST and regex inspection blocking SSNs, MRNs, phone numbers, and patient identifiers.
+* **Tamper-Evident HMAC-SHA256 Audit Trail:** Chained, cryptographically signed logs for every evaluation and state transition.
+* **Air-Gapped LLM Reasoning Adapter:** Agnostic integration for local Ollama instances (`llama3`, `mistral`), Claude 3.5 Sonnet, GPT-4o, and deterministic test mocks.
+* **Active Learning Bayesian Calibration:** Dynamic tracker updating worker reliability weights and monitoring Brier calibration drift.
+* **FastAPI & Prometheus Telemetry:** Exposes OpenAPI 3.1 REST endpoints and operational Prometheus metrics (`/metrics`).
+
+---
+
+## 🧪 Testing & Verification
+
+Run the automated test suite:
 
 ```bash
-# Interpret time-to-positivity
-python cli.py ttp --hours 8.0
-
-# Assess contamination
-python cli.py contamination --organism staphylococcus_aureus --ttp 10.0
-
-# Full analysis
-python cli.py analyze --organism escherichia_coli --ttp 14.0 --gram-stain gram_negative_rods
+pytest -v
 ```
 
-## Python API
-
-```python
-from blood_culture_sentinel import analyze_blood_culture
-
-result = analyze_blood_culture(
-    organism="staphylococcus_aureus",
-    ttp_hours=6.0,
-    gram_stain="gram_positive_cocci_clusters",
-    num_bottles_positive=2,
-    num_bottles_total=2,
-)
-```
-
-## Testing
+Execute high-throughput batch simulation benchmarks:
 
 ```bash
-python -m pytest test_blood_culture_sentinel.py -v
+python simulator.py --tasks 1000 --concurrency 8
 ```
 
-## Standards
+---
 
-- CLSI M47: Principles and Procedures for Blood Cultures
-- IDSA Guidelines for S. aureus Bacteremia
-- CAP Microbiology Checklist
+## 🐳 Container Deployment
 
-## License
-
-MIT
+```bash
+docker build -t blood-culture-early-alert-agent .
+docker run -p 8000:8000 blood-culture-early-alert-agent
+```
