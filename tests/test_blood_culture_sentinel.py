@@ -247,3 +247,14 @@ def test_cli_help():
     with pytest.raises(SystemExit) as exc:
         main(["ttp", "--help"])
     assert exc.value.code == 0
+
+
+def test_cli_batch(tmp_path):
+    out_file = str(tmp_path / "batch_out.csv")
+    ret = main(["batch", "-i", "sample.csv", "-o", out_file])
+    assert ret == 0
+    with open(out_file, "r", encoding="utf-8") as f:
+        content = f.read()
+        assert "computed_urgency_escalation" in content
+        assert "critical_panic_call_window_minutes" in content
+

@@ -715,6 +715,11 @@ def build_parser():
     s_full.add_argument("--immunocompromised", action="store_true")
     s_full.add_argument("--neutropenic", action="store_true")
 
+    # Batch command
+    s_batch = sub.add_parser("batch", help="Batch process CSV records of blood culture alerts")
+    s_batch.add_argument("-i", "--input", required=True, help="Input CSV file path")
+    s_batch.add_argument("-o", "--output", default="results.csv", help="Output CSV file path")
+
     return p
 
 
@@ -759,6 +764,88 @@ def main(argv=None):
             patient_factors=patient_factors if patient_factors else None,
         )
         print(json.dumps(result, indent=2))
+        return 0
+
+    elif args.cmd == "batch":
+        with open(args.input, mode="r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+
+        out_fields = fieldnames + [
+            "computed_urgency_escalation",
+            "time_to_positivity_category",
+            "empiric_antibiotic_advisory",
+            "likely_pathogens",
+            "critical_panic_call_window_minutes",
+        ]
+        # Preserve unique order
+        unique_out_fields = []
+        for field in out_fields:
+            if field not in unique_out_fields:
+                unique_out_fields.append(field)
+
+        out_rows = []
+        for r in rows:
+            # Extract fields with fallbacks
+            bottle_id = r.get("bottle_barcode", r.get("case_id", "UNKNOWN_BOTTLE"))
+            patient_id = r.get("patient_id", r.get("patient_synthetic_id", "UNKNOWN_PATIENT"))
+            gram_stain_raw = r.get("gram_stain_morphology", r.get("gram_stain", r.get("status_flag", "Unknown Gram Stain")))
+            
+            # Parse TTP
+            ttp_val = 24.0
+            for ttp_key in ["time_to_flag_positive_hours", "time_to_flag_positive", "ttp_hours", "ttp", "metric_primary"]:
+                if ttp_key in r and r[ttp_key]:
+                    try:
+                        ttp_val = float(r[ttp_key])
+                        break
+                    except ValueError:
+                        pass
+
+            # Existing or inferred alert level
+            input_urgency = r.get("critical_alert_escalation_level", "").upper()
+
+            # Interpret Gram stain and TTP
+            gs_analysis = interpret_gram_stain(gram_stain_raw)
+            ttp_analysis = interpret_ttp(ttp_val)
+
+            likely_orgs = gs_analysis.get("empiric_guidance", {}).get("likely_organisms", "")
+            if not likely_orgs and gs_analysis.get("expected_organisms"):
+                likely_orgs = ", ".join(gs_analysis["expected_organisms"][:3])
+
+            empiric_therapies = gs_analysis.get("empiric_guidance", {}).get("empiric_therapy", ["Broad-spectrum empiric coverage"])
+            advisory_text = "; ".join(empiric_therapies)
+
+            # Determine clinical escalation urgency
+            # Rapid TTP (<12h) or GNB/yeast/GPC in pairs/chains or high risk -> STAT
+            gs_lower = gram_stain_raw.lower()
+            if input_urgency in ["STAT", "URGENT", "ROUTINE"]:
+                final_urgency = input_urgency
+            else:
+                if ttp_val < 12.0 or "gram_negative" in gs_lower or "yeast" in gs_lower or "candida" in gs_lower or "chains" in gs_lower or "diplococci" in gs_lower:
+                    final_urgency = "STAT"
+                elif ttp_val <= 24.0 or "cluster" in gs_lower or "staph" in gs_lower:
+                    final_urgency = "Urgent"
+                else:
+                    final_urgency = "Routine"
+
+            panic_call_window = 30 if final_urgency in ["STAT", "Urgent"] else 60
+
+            row_dict = dict(r)
+            row_dict["computed_urgency_escalation"] = final_urgency
+            row_dict["time_to_positivity_category"] = ttp_analysis.get("category", "NORMAL_GROWTH")
+            row_dict["empiric_antibiotic_advisory"] = advisory_text
+            row_dict["likely_pathogens"] = likely_orgs or "Diverse bacteremia isolates"
+            row_dict["critical_panic_call_window_minutes"] = panic_call_window
+
+            out_rows.append(row_dict)
+
+        with open(args.output, mode="w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=unique_out_fields)
+            writer.writeheader()
+            writer.writerows(out_rows)
+
+        print(f"Batch processed {len(out_rows)} blood culture records -> {args.output}")
         return 0
 
     else:
