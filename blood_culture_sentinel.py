@@ -202,12 +202,12 @@ def interpret_ttp(ttp_hours: float) -> Dict[str, Any]:
             "Interpret with organism identity, source, and patient context",
         ]
     elif ttp_hours <= 36:
-        category = "INTERMEDIATE_GROWTH"
+        category = "NORMAL_GROWTH"
         significance = "MODERATE"
         interpretation = "Intermediate instrument positivity (12-36 h)"
         concerns = ["TTP alone does not establish pathogen versus contaminant status"]
     else:
-        category = "LATE_GROWTH"
+        category = "SLOW_GROWTH"
         significance = "LOW_TO_MODERATE"
         interpretation = "Late instrument positivity (>36 h)"
         concerns = [
