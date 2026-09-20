@@ -5,7 +5,7 @@ Composite true-bacteremia scoring combining TTP, procalcitonin, lactate and WBC
 per ENRICHMENT thresholds; central-peripheral TTP differential for CLABSI;
 MALDI-TOF organism-ID posterior refinement.
 
-Zero-dependency. Author: Dr. Abu Suraih Sakhri. License: MIT.
+Zero-dependency. Author: NAME. License: MIT.
 """
 import argparse
 import json
