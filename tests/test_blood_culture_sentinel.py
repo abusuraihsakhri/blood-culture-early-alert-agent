@@ -258,3 +258,44 @@ def test_cli_batch(tmp_path):
         assert "computed_urgency_escalation" in content
         assert "critical_panic_call_window_minutes" in content
 
+
+
+def test_gram_stain_common_abbreviation_gnb():
+    result = interpret_gram_stain("GNB")
+    assert result["normalised_gram_stain"] == "gram_negative_rods"
+    assert "escherichia_coli" in result["expected_organisms"]
+
+
+def test_invalid_bottle_counts_are_rejected():
+    with pytest.raises(ValueError):
+        assess_contamination(
+            "staphylococcus_epidermidis",
+            24.0,
+            num_bottles_positive=3,
+            num_bottles_total=2,
+        )
+
+
+def test_batch_urgent_rows_use_30_minute_window(tmp_path):
+    import csv
+
+    out_file = str(tmp_path / "batch_out.csv")
+    assert main(["batch", "-i", "sample.csv", "-o", out_file]) == 0
+
+    with open(out_file, newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+
+    target = next(row for row in rows if row["bottle_barcode"] == "BC-773419-A")
+    assert target["computed_urgency_escalation"] == "URGENT"
+    assert target["critical_panic_call_window_minutes"] == "30"
+
+
+def test_batch_does_not_silently_impute_missing_ttp(tmp_path):
+    input_file = tmp_path / "missing_ttp.csv"
+    input_file.write_text(
+        "bottle_barcode,gram_stain_morphology\nBC-1,GNB\n",
+        encoding="utf-8",
+    )
+    out_file = tmp_path / "out.csv"
+    assert main(["batch", "-i", str(input_file), "-o", str(out_file)]) == 2
+    assert not out_file.exists()

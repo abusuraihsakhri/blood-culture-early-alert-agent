@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Browser-based blood culture time-to-positivity and contamination heuristic utility.">
+  <title>Blood Culture Early Alert Agent</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Microbiology utility</p>
+        <h1>Blood Culture Early Alert Agent</h1>
+        <p class="subtitle">TTP, bottle pattern, and Gram-stain heuristic review</p>
+      </div>
+      <div class="topbar-actions">
+        <span class="privacy-chip" title="All calculations run in this browser">Local only</span>
+        <button class="icon-button" id="themeToggle" type="button" aria-label="Toggle dark mode">◐</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="panel input-panel" aria-labelledby="inputTitle">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">Input</p>
+            <h2 id="inputTitle">Culture details</h2>
+          </div>
+          <button class="text-button" id="sampleButton" type="button">Load sample</button>
+        </div>
+
+        <form id="analysisForm" novalidate>
+          <div class="form-grid">
+            <label class="field field-wide">
+              <span>Organism</span>
+              <input id="organism" name="organism" list="organisms" value="staphylococcus_aureus" autocomplete="off" required>
+              <datalist id="organisms">
+                <option value="staphylococcus_aureus"></option>
+                <option value="coagulase_negative_staphylococcus"></option>
+                <option value="staphylococcus_epidermidis"></option>
+                <option value="escherichia_coli"></option>
+                <option value="klebsiella_pneumoniae"></option>
+                <option value="pseudomonas_aeruginosa"></option>
+                <option value="enterococcus_faecalis"></option>
+                <option value="candida_albicans"></option>
+              </datalist>
+            </label>
+
+            <label class="field field-wide">
+              <span>Gram stain</span>
+              <select id="gramStain" name="gramStain">
+                <option value="gram_positive_cocci_clusters">GPC in clusters</option>
+                <option value="gram_positive_cocci_chains">GPC in pairs / chains</option>
+                <option value="gram_negative_rods">Gram-negative bacilli</option>
+                <option value="gram_negative_diplococci">Gram-negative diplococci</option>
+                <option value="gram_positive_rods">Gram-positive rods</option>
+                <option value="yeast">Yeast</option>
+                <option value="">Not available</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>TTP, hours</span>
+              <input id="ttp" name="ttp" type="number" min="0" max="240" step="0.1" value="8.5" required>
+            </label>
+
+            <label class="field">
+              <span>Positive bottles</span>
+              <input id="positiveBottles" name="positiveBottles" type="number" min="0" max="20" step="1" value="2" required>
+            </label>
+
+            <label class="field">
+              <span>Total bottles</span>
+              <input id="totalBottles" name="totalBottles" type="number" min="1" max="20" step="1" value="2" required>
+            </label>
+
+            <label class="check-field">
+              <input id="highRiskHost" type="checkbox">
+              <span>High-risk host</span>
+            </label>
+          </div>
+
+          <p class="validation" id="validation" role="alert" aria-live="polite"></p>
+
+          <button class="primary-button" type="submit">
+            <span>Analyze</span>
+            <span aria-hidden="true">→</span>
+          </button>
+        </form>
+
+        <p class="input-note">No data are sent to a server. This page stores only the selected theme in browser storage.</p>
+      </section>
+
+      <section class="panel result-panel" aria-labelledby="resultTitle">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">Result</p>
+            <h2 id="resultTitle">Interpretation</h2>
+          </div>
+          <button class="text-button" id="exportButton" type="button" disabled>Export JSON</button>
+        </div>
+
+        <div class="status-row" aria-live="polite">
+          <article class="metric-card">
+            <span>Classification</span>
+            <strong id="classification">Not analyzed</strong>
+          </article>
+          <article class="metric-card">
+            <span>Heuristic score</span>
+            <strong id="score">—</strong>
+          </article>
+          <article class="metric-card">
+            <span>TTP category</span>
+            <strong id="ttpCategory">—</strong>
+          </article>
+          <article class="metric-card">
+            <span>Review priority</span>
+            <strong id="priority">—</strong>
+          </article>
+        </div>
+
+        <div class="result-grid">
+          <article class="result-block">
+            <h3>Interpretation</h3>
+            <p id="interpretation">Enter culture details and select Analyze.</p>
+          </article>
+
+          <article class="result-block">
+            <h3>Gram-stain differential</h3>
+            <p id="likelyOrganisms">—</p>
+          </article>
+
+          <article class="result-block result-block-wide">
+            <h3>Review prompts</h3>
+            <ul id="reviewPrompts">
+              <li>Results will appear here.</li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="disclaimer">
+          <strong>Research / education use.</strong>
+          The score is a transparent heuristic, not a calibrated clinical probability or treatment recommendation.
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>Static GitHub Pages application</span>
+      <span>•</span>
+      <a href="https://github.com/abusuraihsakhri/blood-culture-early-alert-agent">Source repository</a>
+    </footer>
+  </div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

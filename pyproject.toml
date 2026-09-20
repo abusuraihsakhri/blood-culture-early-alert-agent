@@ -1,27 +1,60 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "blood-culture-early-alert-engine"
-version = "2.0.0"
-description = "BloodCulture Sentinel: Time-to-Positivity & True Pathogen vs Contaminant Arbiter"
+name = "blood-culture-early-alert-agent"
+version = "2.1.0"
+description = "Blood culture time-to-positivity and contamination heuristic utilities"
 readme = "README.md"
-authors = [{ name = "Dr. Abu Suraih Sakhri", email = "abusuraih@example.com" }]
-license = { text = "MIT" }
+authors = [{ name = "NAME" }]
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = []
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-requires-python = ">=3.9"
-dependencies = []
 
 [project.scripts]
-blood-culture-early-alert-engine = "blood_culture_early_alert_agent.cli:main"
+blood-culture-early-alert-agent = "blood_culture_sentinel:main"
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.115,<1",
+    "pydantic>=2,<3",
+    "uvicorn>=0.30,<1",
+]
+dev = [
+    "build>=1.2",
+    "pip-audit>=2.7",
+    "pytest>=8",
+    "ruff>=0.8",
+]
 
 [project.urls]
-Homepage = "https://github.com/abusuraihsakhri/blood-culture-early-alert-engine"
-Repository = "https://github.com/abusuraihsakhri/blood-culture-early-alert-engine.git"
+Homepage = "https://github.com/abusuraihsakhri/blood-culture-early-alert-agent"
+Repository = "https://github.com/abusuraihsakhri/blood-culture-early-alert-agent.git"
+
+[tool.setuptools]
+py-modules = [
+    "blood_culture_sentinel",
+    "deescalation_trigger",
+    "enrichment",
+    "maldi_tof_integration",
+    "sepsis_biomarker_composite",
+    "sepsis_biomarker_correlation",
+]
+
+[tool.setuptools.packages.find]
+include = ["blood_culture_early_alert_agent*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]
