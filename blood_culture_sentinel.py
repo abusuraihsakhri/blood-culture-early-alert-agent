@@ -714,6 +714,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch = sub.add_parser("batch", help="Process CSV records")
     p_batch.add_argument("-i", "--input", required=True)
     p_batch.add_argument("-o", "--output", default="results.csv")
+
+    p_serve = sub.add_parser("serve", help="Launch the optional FastAPI server")
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=8000)
     return parser
 
 
@@ -757,6 +761,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                 patient_factors=factors or None,
             )
             print(json.dumps(result, indent=2))
+            return 0
+
+        if args.cmd == "serve":
+            try:
+                import uvicorn
+                from blood_culture_early_alert_agent.server import create_app
+            except ImportError:
+                print('error: install the "server" extra to use this command', file=sys.stderr)
+                return 2
+
+            app = create_app()
+            if app is None:
+                print('error: install the "server" extra to use this command', file=sys.stderr)
+                return 2
+            uvicorn.run(app, host=args.host, port=args.port)
             return 0
 
         if args.cmd == "batch":
