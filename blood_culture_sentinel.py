@@ -199,7 +199,7 @@ def interpret_ttp(ttp_hours: float) -> Dict[str, Any]:
         interpretation = "Early instrument positivity (<12 h)"
         concerns = [
             "Higher organism burden is possible",
-            "Interpret with organism identity, source, and patient context",
+            "Endocarditis or another endovascular source may require assessment for selected organisms; TTP alone is not diagnostic",
         ]
     elif ttp_hours <= 36:
         category = "NORMAL_GROWTH"
@@ -427,7 +427,7 @@ def assess_escalation_triggers(
 
     if ttp_hours < 12:
         triggers.append(
-            {"trigger": "EARLY_POSITIVITY", "severity": "HIGH", "detail": f"TTP {ttp_hours:.1f} h"}
+            {"trigger": "RAPID_TTP", "severity": "HIGH", "detail": f"TTP {ttp_hours:.1f} h"}
         )
 
     high_priority = {
