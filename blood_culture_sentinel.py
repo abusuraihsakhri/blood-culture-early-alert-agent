@@ -443,7 +443,7 @@ def assess_escalation_triggers(
     if organism_key in high_priority:
         triggers.append(
             {
-                "trigger": "HIGH_PRIORITY_ORGANISM",
+                "trigger": "HIGH_RISK_ORGANISM",
                 "severity": "HIGH",
                 "detail": f"{organism} warrants prompt organism-specific review",
             }
@@ -455,7 +455,7 @@ def assess_escalation_triggers(
         if resistant_count >= 3:
             triggers.append(
                 {
-                    "trigger": "MULTI_DRUG_RESISTANCE_SIGNAL",
+                    "trigger": "MULTI_DRUG_RESISTANT",
                     "severity": "CRITICAL",
                     "detail": f"{resistant_count} reported resistant results",
                 }
