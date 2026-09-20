@@ -1,37 +1,53 @@
-name: Blood Culture Early Alert Engine CI/CD & Security Verification
+name: CI
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [master, main]
   pull_request:
-    branches: [ master, main ]
+    branches: [master, main]
+
+permissions:
+  contents: read
 
 jobs:
-  test-and-audit:
+  test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install fastapi uvicorn pydantic pytest
+      - name: Install project and verification tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest ruff build
 
-    - name: Run Pytest Suite
-      run: |
-        python -m pytest -p no:zarr -v
+      - name: Unit and integration tests
+        run: python -m pytest -p no:zarr -q
 
-    - name: CLI Batch Smoke Test
-      run: |
-        python cli.py batch -i sample.csv -o out_smoke.csv
-        rm -f out_smoke.csv
+      - name: Lint maintained entry points
+        run: |
+          ruff check blood_culture_sentinel.py cli.py             blood_culture_early_alert_agent/cli.py             blood_culture_early_alert_agent/__init__.py
 
+      - name: Package build
+        run: python -m build
+
+      - name: Dependency consistency
+        run: python -m pip check
+
+      - name: Installed CLI smoke test
+        run: |
+          blood-culture-early-alert-agent batch -i sample.csv -o out_smoke.csv
+          test -s out_smoke.csv
+          rm out_smoke.csv
+
+      - name: Browser JavaScript syntax check
+        run: node --check docs/app.js
