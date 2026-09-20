@@ -568,7 +568,7 @@ def recommend_repeat_cultures(
     if ttp_hours < 12:
         recs.append(
             {
-                "reason": "Early positivity",
+                "reason": "Early positivity; endocarditis/source assessment depends on organism and context",
                 "action": "Prioritise source assessment; TTP alone does not diagnose endocarditis",
                 "evidence": "TTP is supportive rather than diagnostic",
             }
