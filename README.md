@@ -1,5 +1,7 @@
 # Blood Culture Early Alert Agent
 
+### [Open the Live Application →](https://abusuraihsakhri.github.io/blood-culture-early-alert-agent/)
+
 Blood-culture time-to-positivity (TTP), Gram-stain, bottle-pattern, and contamination heuristic utilities for research, education, workflow prototyping, and software testing.
 
 > **Important:** the contamination score is a transparent heuristic, not a calibrated clinical probability or a validated clinical decision-support model. Clinical actions should follow local microbiology, antimicrobial-stewardship, infectious-diseases, and infection-control procedures.
