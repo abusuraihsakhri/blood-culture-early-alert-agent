@@ -1,37 +1,68 @@
 #!/usr/bin/env python3
-"""
-Blood Culture Early Alert Agent
+"""Blood-culture time-to-positivity and contamination decision-support utilities.
 
-Real implementation of:
-- Time-to-positivity (TTP) interpretation
-- Contamination assessment (true pathogen vs contaminant)
-- Gram stain interpretation and expected organisms
-- Antibiotic escalation triggers
-- Repeat blood culture recommendations
-
-Uses only Python stdlib.
+The rules in this module are transparent heuristics intended for research,
+education, workflow prototyping, and software testing. They are not calibrated
+clinical prediction models and must not replace local microbiology,
+antimicrobial-stewardship, or infectious-diseases guidance.
 """
+
+from __future__ import annotations
 
 import argparse
 import csv
 import json
+import math
+import re
 import sys
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
-# ─── Known Organism Databases ────────────────────────────────────────────────
 
 COMMON_CONTAMINANTS = {
-    "coagulase_negative_staphylococcus": {"common_name": "Coagulase-negative Staph (CoNS)", "contaminant_probability": 0.85},
-    "staphylococcus_epidermidis": {"common_name": "S. epidermidis", "contaminant_probability": 0.85},
-    "staphylococcus_haemolyticus": {"common_name": "S. haemolyticus", "contaminant_probability": 0.80},
-    "staphylococcus_lugdunensis": {"common_name": "S. lugdunensis", "contaminant_probability": 0.30},  # More often pathogenic
-    "corynebacterium": {"common_name": "Corynebacterium spp.", "contaminant_probability": 0.90},
-    "corynebacterium_jeikeium": {"common_name": "C. jeikeium", "contaminant_probability": 0.50},
-    "propionibacterium_acnes": {"common_name": "P. acnes", "contaminant_probability": 0.95},
-    "cutibacterium_acnes": {"common_name": "C. acnes", "contaminant_probability": 0.95},
-    "bacillus": {"common_name": "Bacillus spp. (not B. anthracis)", "contaminant_probability": 0.90},
-    "bacillus_cereus": {"common_name": "B. cereus", "contaminant_probability": 0.60},
-    "micrococcus": {"common_name": "Micrococcus spp.", "contaminant_probability": 0.95},
+    "coagulase_negative_staphylococcus": {
+        "common_name": "Coagulase-negative Staphylococcus (CoNS)",
+        "contaminant_probability": 0.85,
+    },
+    "staphylococcus_epidermidis": {
+        "common_name": "S. epidermidis",
+        "contaminant_probability": 0.85,
+    },
+    "staphylococcus_haemolyticus": {
+        "common_name": "S. haemolyticus",
+        "contaminant_probability": 0.80,
+    },
+    "staphylococcus_lugdunensis": {
+        "common_name": "S. lugdunensis",
+        "contaminant_probability": 0.30,
+    },
+    "corynebacterium": {
+        "common_name": "Corynebacterium spp.",
+        "contaminant_probability": 0.90,
+    },
+    "corynebacterium_jeikeium": {
+        "common_name": "C. jeikeium",
+        "contaminant_probability": 0.50,
+    },
+    "cutibacterium_acnes": {
+        "common_name": "C. acnes",
+        "contaminant_probability": 0.95,
+    },
+    "propionibacterium_acnes": {
+        "common_name": "P. acnes",
+        "contaminant_probability": 0.95,
+    },
+    "bacillus": {
+        "common_name": "Bacillus spp. (excluding B. anthracis)",
+        "contaminant_probability": 0.90,
+    },
+    "bacillus_cereus": {
+        "common_name": "B. cereus",
+        "contaminant_probability": 0.60,
+    },
+    "micrococcus": {
+        "common_name": "Micrococcus spp.",
+        "contaminant_probability": 0.95,
+    },
     "rothia": {"common_name": "Rothia spp.", "contaminant_probability": 0.80},
     "diphtheroids": {"common_name": "Diphtheroids", "contaminant_probability": 0.90},
 }
@@ -48,9 +79,12 @@ TRUE_PATHOGENS = {
     "candida_glabrata": {"common_name": "C. glabrata", "pathogen_probability": 0.97},
     "candida": {"common_name": "Candida spp.", "pathogen_probability": 0.97},
     "streptococcus_pneumoniae": {"common_name": "S. pneumoniae", "pathogen_probability": 0.98},
-    "streptococcus_pyogenes": {"common_name": "S. pyogenes (Group A Strep)", "pathogen_probability": 0.98},
-    "streptococcus_agalactiae": {"common_name": "S. agalactiae (Group B Strep)", "pathogen_probability": 0.95},
-    "streptococcus_viridans": {"common_name": "Viridans group Streptococci", "pathogen_probability": 0.75},
+    "streptococcus_pyogenes": {"common_name": "S. pyogenes", "pathogen_probability": 0.98},
+    "streptococcus_agalactiae": {"common_name": "S. agalactiae", "pathogen_probability": 0.95},
+    "streptococcus_viridans": {
+        "common_name": "Viridans group streptococci",
+        "pathogen_probability": 0.75,
+    },
     "enterobacter_cloacae": {"common_name": "E. cloacae", "pathogen_probability": 0.95},
     "serratia_marcescens": {"common_name": "S. marcescens", "pathogen_probability": 0.95},
     "proteus_mirabilis": {"common_name": "P. mirabilis", "pathogen_probability": 0.95},
@@ -63,327 +97,322 @@ TRUE_PATHOGENS = {
     "listeria_monocytogenes": {"common_name": "L. monocytogenes", "pathogen_probability": 0.98},
 }
 
-# Gram stain mapping
 GRAM_STAIN_MAP = {
     "gram_positive_cocci_clusters": [
-        "staphylococcus_aureus", "coagulase_negative_staphylococcus",
-        "staphylococcus_epidermidis", "staphylococcus_lugdunensis",
+        "staphylococcus_aureus",
+        "coagulase_negative_staphylococcus",
+        "staphylococcus_epidermidis",
+        "staphylococcus_lugdunensis",
     ],
     "gram_positive_cocci_chains": [
-        "streptococcus_pneumoniae", "streptococcus_pyogenes",
-        "streptococcus_agalactiae", "streptococcus_viridans",
-        "enterococcus_faecalis", "enterococcus_faecium",
+        "streptococcus_pneumoniae",
+        "streptococcus_pyogenes",
+        "streptococcus_agalactiae",
+        "streptococcus_viridans",
+        "enterococcus_faecalis",
+        "enterococcus_faecium",
     ],
     "gram_negative_rods": [
-        "escherichia_coli", "klebsiella_pneumoniae", "pseudomonas_aeruginosa",
-        "enterobacter_cloacae", "serratia_marcescens", "proteus_mirabilis",
-        "acinetobacter_baumannii", "haemophilus_influenzae",
+        "escherichia_coli",
+        "klebsiella_pneumoniae",
+        "pseudomonas_aeruginosa",
+        "enterobacter_cloacae",
+        "serratia_marcescens",
+        "proteus_mirabilis",
+        "acinetobacter_baumannii",
+        "haemophilus_influenzae",
     ],
-    "gram_negative_diplococci": [
-        "neisseria_meningitidis",
-    ],
+    "gram_negative_diplococci": ["neisseria_meningitidis"],
     "gram_positive_rods": [
-        "listeria_monocytogenes", "corynebacterium", "bacillus",
-        "clostridium_perfringens", "cutibacterium_acnes",
+        "listeria_monocytogenes",
+        "corynebacterium",
+        "bacillus",
+        "clostridium_perfringens",
+        "cutibacterium_acnes",
     ],
-    "yeast": [
-        "candida_albicans", "candida_glabrata", "candida",
-        "cryptococcus_neoformans",
-    ],
+    "yeast": ["candida_albicans", "candida_glabrata", "candida", "cryptococcus_neoformans"],
+}
+
+GRAM_ALIASES = {
+    "gpc_in_clusters": "gram_positive_cocci_clusters",
+    "gpc_clusters": "gram_positive_cocci_clusters",
+    "gpc_in_pairs_chains": "gram_positive_cocci_chains",
+    "gpc_pairs_chains": "gram_positive_cocci_chains",
+    "gpc_chains": "gram_positive_cocci_chains",
+    "gnb": "gram_negative_rods",
+    "gnr": "gram_negative_rods",
+    "gnc": "gram_negative_diplococci",
+    "gndc": "gram_negative_diplococci",
+    "gpr": "gram_positive_rods",
+    "budding_yeast": "yeast",
+    "yeast_pseudohyphae": "yeast",
+}
+
+ORGANISM_ALIASES = {
+    "s_aureus": "staphylococcus_aureus",
+    "staph_aureus": "staphylococcus_aureus",
+    "e_coli": "escherichia_coli",
+    "p_aeruginosa": "pseudomonas_aeruginosa",
+    "c_acnes": "cutibacterium_acnes",
+    "cons": "coagulase_negative_staphylococcus",
 }
 
 
-# ─── Time-to-Positivity Interpretation ───────────────────────────────────────
+def _slug(value: str) -> str:
+    value = value.strip().lower()
+    value = re.sub(r"[^a-z0-9]+", "_", value).strip("_")
+    return value
+
+
+def _normalise_organism(value: str) -> str:
+    key = _slug(value)
+    return ORGANISM_ALIASES.get(key, key)
+
+
+def _normalise_gram(value: str) -> str:
+    key = _slug(value)
+    return GRAM_ALIASES.get(key, key)
+
+
+def _require_finite_nonnegative(value: float, label: str) -> None:
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{label} must be a finite non-negative number")
+
+
+def _validate_bottles(positive: int, total: int) -> None:
+    if total < 1:
+        raise ValueError("total bottles must be at least 1")
+    if positive < 0:
+        raise ValueError("positive bottles cannot be negative")
+    if positive > total:
+        raise ValueError("positive bottles cannot exceed total bottles")
+
 
 def interpret_ttp(ttp_hours: float) -> Dict[str, Any]:
-    """Interpret blood culture time-to-positivity.
-
-    Args:
-        ttp_hours: Time to positivity in hours
-
-    Returns:
-        Dict with interpretation, clinical significance, and recommendations
-    """
-    if ttp_hours < 0:
-        return {"error": "TTP cannot be negative", "ttp_hours": ttp_hours}
+    """Categorise TTP using transparent, non-validated heuristic cut points."""
+    if not math.isfinite(ttp_hours) or ttp_hours < 0:
+        return {"error": "TTP must be a finite non-negative number", "ttp_hours": ttp_hours}
 
     if ttp_hours < 12:
-        return {
-            "ttp_hours": ttp_hours,
-            "category": "RAPID_GROWTH",
-            "interpretation": "Rapid time to positivity (<12 hours)",
-            "clinical_significance": "HIGH",
-            "concerns": [
-                "High bacterial burden in bloodstream",
-                "Consider endocarditis, especially with Gram-positive cocci in clusters",
-                "Consider deep-seated source: abscess, osteomyelitis, infected hardware",
-                "May indicate intravascular infection source",
-            ],
-            "recommendations": [
-                "Urgent clinical evaluation",
-                "Echocardiography (TTE/TEE) if Gram-positive cocci identified",
-                "Source control assessment",
-                "Consider infectious disease consultation",
-            ],
-        }
+        category = "RAPID_GROWTH"
+        significance = "HIGH"
+        interpretation = "Early instrument positivity (<12 h)"
+        concerns = [
+            "Higher organism burden is possible",
+            "Interpret with organism identity, source, and patient context",
+        ]
     elif ttp_hours <= 36:
-        return {
-            "ttp_hours": ttp_hours,
-            "category": "NORMAL_GROWTH",
-            "interpretation": "Normal time to positivity (12-36 hours)",
-            "clinical_significance": "MODERATE",
-            "concerns": [
-                "Typical bacteremia",
-                "Standard clinical evaluation appropriate",
-            ],
-            "recommendations": [
-                "Continue current management",
-                "Follow standard blood culture protocols",
-                "Review susceptibilities when available",
-            ],
-        }
+        category = "INTERMEDIATE_GROWTH"
+        significance = "MODERATE"
+        interpretation = "Intermediate instrument positivity (12-36 h)"
+        concerns = ["TTP alone does not establish pathogen versus contaminant status"]
     else:
-        return {
-            "ttp_hours": ttp_hours,
-            "category": "SLOW_GROWTH",
-            "interpretation": "Slow time to positivity (>36 hours)",
-            "clinical_significance": "LOW_TO_MODERATE",
-            "concerns": [
-                "Possible contaminant organism",
-                "Low-grade or intermittent bacteremia",
-                "Fastidious organism (consider HACEK group, Brucella)",
-                "Prior antibiotic exposure may delay growth",
-            ],
-            "recommendations": [
-                "Correlate with Gram stain and organism identification",
-                "Assess clinical context for true bacteremia vs contamination",
-                "Consider repeat blood cultures if clinical suspicion remains",
-                "If fastidious organism suspected, consider extended incubation",
-            ],
-        }
+        category = "LATE_GROWTH"
+        significance = "LOW_TO_MODERATE"
+        interpretation = "Late instrument positivity (>36 h)"
+        concerns = [
+            "Some skin-flora contaminants are more common among late positives",
+            "Fastidious organisms and prior antimicrobial exposure can also delay positivity",
+        ]
+
+    return {
+        "ttp_hours": ttp_hours,
+        "category": category,
+        "interpretation": interpretation,
+        "clinical_significance": significance,
+        "concerns": concerns,
+        "recommendations": [
+            "Correlate TTP with organism identification, number of positive sets, collection site, and clinical context",
+            "Use local laboratory and antimicrobial-stewardship procedures for clinical actions",
+        ],
+        "heuristic": True,
+    }
 
 
-# ─── Contamination Assessment ────────────────────────────────────────────────
+def _lookup_organism(key: str) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    contaminant_info = COMMON_CONTAMINANTS.get(key)
+    pathogen_info = TRUE_PATHOGENS.get(key)
 
-def assess_contamination(organism: str, ttp_hours: float,
-                          num_bottles_positive: int = 1,
-                          num_bottles_total: int = 2,
-                          gram_stain: Optional[str] = None) -> Dict[str, Any]:
-    """Assess likelihood of true bacteremia vs contamination.
+    if contaminant_info is None:
+        for candidate, info in COMMON_CONTAMINANTS.items():
+            if candidate in key or key in candidate:
+                contaminant_info = info
+                break
 
-    Args:
-        organism: Identified organism name
-        ttp_hours: Time to positivity in hours
-        num_bottles_positive: Number of positive bottles
-        num_bottles_total: Total number of bottles drawn
-        gram_stain: Gram stain result (optional)
+    if pathogen_info is None:
+        for candidate, info in TRUE_PATHOGENS.items():
+            if candidate in key or key in candidate:
+                pathogen_info = info
+                break
 
-    Returns:
-        Dict with contamination assessment, probability, and recommendations
+    return contaminant_info, pathogen_info
+
+
+def assess_contamination(
+    organism: str,
+    ttp_hours: float,
+    num_bottles_positive: int = 1,
+    num_bottles_total: int = 2,
+    gram_stain: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Compute an interpretable heuristic contamination score.
+
+    The returned contamination_probability key is retained for backward
+    compatibility. It is a heuristic score in [0, 1], not a calibrated
+    probability from a validated clinical prediction model.
     """
-    organism_key = organism.lower().replace(" ", "_").replace(".", "")
+    _require_finite_nonnegative(ttp_hours, "TTP")
+    _validate_bottles(num_bottles_positive, num_bottles_total)
 
-    # Check if known contaminant
-    contaminant_info = None
-    for key, info in COMMON_CONTAMINANTS.items():
-        if key in organism_key or organism_key in key:
-            contaminant_info = info
-            break
+    organism_key = _normalise_organism(organism)
+    contaminant_info, pathogen_info = _lookup_organism(organism_key)
 
-    # Check if known pathogen
-    pathogen_info = None
-    for key, info in TRUE_PATHOGENS.items():
-        if key in organism_key or organism_key in key:
-            pathogen_info = info
-            break
-
-    # Calculate contamination probability
     if contaminant_info and not pathogen_info:
-        base_contamination_prob = contaminant_info.get("contaminant_probability",
-                                                        contaminant_info.get("contamination_probability", 0.5))
+        base = contaminant_info["contaminant_probability"]
     elif pathogen_info:
-        base_contamination_prob = 1.0 - pathogen_info.get("pathogen_probability",
-                                                            pathogen_info.get("contamination_probability", 0.5))
+        base = 1.0 - pathogen_info["pathogen_probability"]
     else:
-        base_contamination_prob = 0.5  # Unknown organism
+        base = 0.50
 
-    # Adjust for TTP
-    ttp_adjustment = 0.0
-    if ttp_hours > 36:
-        ttp_adjustment += 0.15  # Slow growth increases contamination likelihood
-    elif ttp_hours < 12:
-        ttp_adjustment -= 0.20  # Rapid growth decreases contamination likelihood
+    ttp_adjustment = 0.15 if ttp_hours > 36 else (-0.20 if ttp_hours < 12 else 0.0)
+    positivity_ratio = num_bottles_positive / num_bottles_total
+    bottle_adjustment = -0.25 if positivity_ratio == 1.0 and num_bottles_total >= 2 else 0.0
+    if positivity_ratio <= 0.5:
+        bottle_adjustment += 0.15
 
-    # Adjust for number of positive bottles
-    bottle_adjustment = 0.0
-    if num_bottles_total > 0:
-        positivity_ratio = num_bottles_positive / num_bottles_total
-        if positivity_ratio >= 1.0 and num_bottles_total >= 2:
-            bottle_adjustment -= 0.25  # All bottles positive = more likely true
-        elif positivity_ratio <= 0.5:
-            bottle_adjustment += 0.15  # Only some bottles positive = more likely contaminant
-
-    contamination_prob = max(0.0, min(1.0,
-        base_contamination_prob + ttp_adjustment + bottle_adjustment))
-
-    # Determine classification
-    if contamination_prob >= 0.75:
+    score = max(0.0, min(1.0, base + ttp_adjustment + bottle_adjustment))
+    if score >= 0.75:
         classification = "LIKELY_CONTAMINANT"
-        clinical_action = "Consider not treating; discuss with clinical team"
-    elif contamination_prob >= 0.40:
+        action = "Review for possible contamination using clinical context and repeat sampling when indicated"
+    elif score >= 0.40:
         classification = "INDETERMINATE"
-        clinical_action = "Repeat blood cultures; correlate clinically"
+        action = "Do not classify from this score alone; correlate clinically"
     else:
         classification = "LIKELY_TRUE_PATHOGEN"
-        clinical_action = "Treat as true bacteremia"
+        action = "Treat the isolate as clinically significant until reviewed in context"
 
-    result = {
+    display = (contaminant_info or pathogen_info or {}).get("common_name", organism)
+    alerts: List[Dict[str, str]] = []
+    if classification == "LIKELY_CONTAMINANT":
+        alerts.append(
+            {
+                "severity": "ADVISORY",
+                "type": "CONTAMINATION_SIGNAL",
+                "message": f"{display} has a high heuristic contamination score ({score:.0%})",
+                "recommendation": "Confirm against collection pattern, repeat cultures, devices, and clinical findings",
+            }
+        )
+    elif classification == "LIKELY_TRUE_PATHOGEN":
+        alerts.append(
+            {
+                "severity": "WARNING",
+                "type": "PATHOGEN_SIGNAL",
+                "message": f"{display} has a low heuristic contamination score ({score:.0%})",
+                "recommendation": "Use organism identification and susceptibility data with local treatment guidance",
+            }
+        )
+    if ttp_hours < 12:
+        alerts.append(
+            {
+                "severity": "CRITICAL",
+                "type": "EARLY_POSITIVITY",
+                "message": f"Early positivity at {ttp_hours:.1f} h",
+                "recommendation": "Prioritise clinical review; TTP alone does not identify the source",
+            }
+        )
+
+    return {
         "organism": organism,
-        "organism_display": (contaminant_info or pathogen_info or {}).get("common_name", organism),
+        "organism_key": organism_key,
+        "organism_display": display,
         "ttp_hours": ttp_hours,
         "num_bottles_positive": num_bottles_positive,
         "num_bottles_total": num_bottles_total,
-        "contamination_probability": round(contamination_prob, 2),
+        "contamination_probability": round(score, 2),
+        "score_is_calibrated_probability": False,
         "classification": classification,
-        "clinical_action": clinical_action,
+        "clinical_action": action,
         "is_known_contaminant": contaminant_info is not None and pathogen_info is None,
         "is_known_pathogen": pathogen_info is not None,
+        "gram_stain": gram_stain,
+        "alerts": alerts,
     }
 
-    # Add alerts
-    alerts = []
-    if classification == "LIKELY_CONTAMINANT":
-        alerts.append({
-            "severity": "ADVISORY",
-            "type": "CONTAMINATION_LIKELY",
-            "message": f"{result['organism_display']} is likely a contaminant "
-                       f"(probability: {contamination_prob:.0%})",
-            "recommendation": "Correlate with clinical presentation. Consider not initiating "
-                            "antimicrobial therapy if patient is clinically well.",
-        })
-    elif classification == "LIKELY_TRUE_PATHOGEN":
-        alerts.append({
-            "severity": "WARNING",
-            "type": "TRUE_PATHOGEN_LIKELY",
-            "message": f"{result['organism_display']} is likely a true pathogen "
-                       f"(contamination probability: {contamination_prob:.0%})",
-            "recommendation": "Initiate appropriate antimicrobial therapy. "
-                            "Obtain susceptibilities and de-escalate when possible.",
-        })
 
-    if ttp_hours < 12:
-        alerts.append({
-            "severity": "CRITICAL",
-            "type": "RAPID_TTP_ALERT",
-            "message": f"Rapid time to positivity ({ttp_hours:.1f}h) suggests high bacterial burden",
-            "recommendation": "Evaluate for endocarditis, deep-seated abscess, or "
-                            "intravascular infection source. Consider echocardiography.",
-        })
+def _get_empiric_guidance(gram_key: str) -> Dict[str, Any]:
+    """Return non-prescriptive organism/coverage prompts for local review."""
+    if gram_key == "gram_positive_cocci_clusters":
+        return {
+            "likely_organisms": "Staphylococcus spp.",
+            "empiric_therapy": ["Review local MRSA/MSSA empiric-coverage pathway"],
+            "key_differentiation": "Rapid species identification and susceptibility testing",
+        }
+    if gram_key == "gram_positive_cocci_chains":
+        return {
+            "likely_organisms": "Streptococcus spp. or Enterococcus spp.",
+            "empiric_therapy": ["Review local streptococcal/enterococcal empiric-coverage pathway"],
+            "key_differentiation": "Species identification and susceptibility testing",
+        }
+    if gram_key == "gram_negative_rods":
+        return {
+            "likely_organisms": "Enterobacterales, non-fermenters, or other Gram-negative bacilli",
+            "empiric_therapy": ["Review local Gram-negative sepsis pathway and antibiogram"],
+            "key_differentiation": "Rapid identification plus resistance-risk assessment",
+        }
+    if gram_key == "gram_negative_diplococci":
+        return {
+            "likely_organisms": "Neisseria spp. and other Gram-negative cocci",
+            "empiric_therapy": ["Urgently review organism-specific infection-control and treatment guidance"],
+            "key_differentiation": "Rapid species confirmation",
+        }
+    if gram_key == "gram_positive_rods":
+        return {
+            "likely_organisms": "Listeria, Corynebacterium, Bacillus, Clostridium, Cutibacterium, or others",
+            "empiric_therapy": ["Interpret with host factors, morphology, and species identification"],
+            "key_differentiation": "Species identification is essential",
+        }
+    if gram_key == "yeast":
+        return {
+            "likely_organisms": "Candida spp., Cryptococcus spp., or other yeasts",
+            "empiric_therapy": ["Urgently review local candidemia/fungemia pathway"],
+            "key_differentiation": "Rapid species identification and antifungal susceptibility where indicated",
+        }
+    return {
+        "likely_organisms": "Not resolved from the supplied morphology",
+        "empiric_therapy": ["Use local blood-culture escalation guidance pending identification"],
+        "key_differentiation": "Confirm morphology and organism identification",
+    }
 
-    result["alerts"] = alerts
-    return result
-
-
-# ─── Gram Stain Interpretation ───────────────────────────────────────────────
 
 def interpret_gram_stain(gram_stain: str) -> Dict[str, Any]:
-    """Interpret a Gram stain result and provide expected organisms.
+    """Interpret common Gram-stain descriptions and laboratory abbreviations."""
+    gram_key = _normalise_gram(gram_stain)
 
-    Args:
-        gram_stain: Gram stain description (e.g., 'gram_positive_cocci_clusters',
-                    'gram_negative_rods', 'yeast')
-
-    Returns:
-        Dict with expected organisms, typical pathogens, and clinical guidance
-    """
-    gs_key = gram_stain.lower().replace(" ", "_").replace("-", "_")
-
-    # Find matching category
-    expected_organisms = []
-    for category, organisms in GRAM_STAIN_MAP.items():
-        if category in gs_key or gs_key in category:
-            expected_organisms = organisms
-            break
-
-    if not expected_organisms:
-        # Try partial matching
-        if "gram_positive" in gs_key and "cocci" in gs_key:
-            if "cluster" in gs_key:
-                expected_organisms = GRAM_STAIN_MAP["gram_positive_cocci_clusters"]
-            elif "chain" in gs_key or "pair" in gs_key:
-                expected_organisms = GRAM_STAIN_MAP["gram_positive_cocci_chains"]
-            else:
-                expected_organisms = (GRAM_STAIN_MAP["gram_positive_cocci_clusters"] +
-                                     GRAM_STAIN_MAP["gram_positive_cocci_chains"])
-        elif "gram_negative" in gs_key and ("rod" in gs_key or "bacill" in gs_key):
-            expected_organisms = GRAM_STAIN_MAP["gram_negative_rods"]
-        elif "gram_negative" in gs_key and ("cocci" in gs_key or "diplo" in gs_key):
-            expected_organisms = GRAM_STAIN_MAP["gram_negative_diplococci"]
-        elif "gram_positive" in gs_key and ("rod" in gs_key or "bacill" in gs_key):
-            expected_organisms = GRAM_STAIN_MAP["gram_positive_rods"]
-        elif "yeast" in gs_key or "fungal" in gs_key:
-            expected_organisms = GRAM_STAIN_MAP["yeast"]
-
-    # Determine empiric therapy guidance
-    empiric_guidance = _get_empiric_guidance(gs_key)
+    expected = GRAM_STAIN_MAP.get(gram_key, [])
+    if not expected:
+        if "gram_positive" in gram_key and "cocci" in gram_key:
+            if "cluster" in gram_key:
+                gram_key = "gram_positive_cocci_clusters"
+            elif "chain" in gram_key or "pair" in gram_key:
+                gram_key = "gram_positive_cocci_chains"
+        elif "gram_negative" in gram_key and ("rod" in gram_key or "bacill" in gram_key):
+            gram_key = "gram_negative_rods"
+        elif "gram_negative" in gram_key and ("cocci" in gram_key or "diplo" in gram_key):
+            gram_key = "gram_negative_diplococci"
+        elif "gram_positive" in gram_key and ("rod" in gram_key or "bacill" in gram_key):
+            gram_key = "gram_positive_rods"
+        elif "yeast" in gram_key or "fungal" in gram_key:
+            gram_key = "yeast"
+        expected = GRAM_STAIN_MAP.get(gram_key, [])
 
     return {
         "gram_stain": gram_stain,
-        "expected_organisms": expected_organisms,
-        "empiric_guidance": empiric_guidance,
-        "num_expected": len(expected_organisms),
+        "normalised_gram_stain": gram_key,
+        "expected_organisms": expected,
+        "empiric_guidance": _get_empiric_guidance(gram_key),
+        "num_expected": len(expected),
     }
 
-
-def _get_empiric_guidance(gram_stain_key: str) -> Dict[str, Any]:
-    """Get empiric antibiotic guidance based on Gram stain."""
-    if "gram_positive" in gram_stain_key and "cocci" in gram_stain_key:
-        if "cluster" in gram_stain_key:
-            return {
-                "likely_organisms": "Staphylococcus spp. (S. aureus or CoNS)",
-                "empiric_therapy": [
-                    "Vancomycin (if MRSA risk factors present)",
-                    "Cefazolin or Nafcillin/Oxacillin (if MSSA likely)",
-                ],
-                "key_differentiation": "Coagulase test, MALDI-TOF",
-            }
-        else:
-            return {
-                "likely_organisms": "Streptococcus spp. or Enterococcus spp.",
-                "empiric_therapy": [
-                    "Ampicillin + Gentamicin (if Enterococcus suspected)",
-                    "Penicillin or Ceftriaxone (if Streptococcus suspected)",
-                ],
-                "key_differentiation": "Catalase test, PYR test, bile esculin",
-            }
-    elif "gram_negative" in gram_stain_key and "rod" in gram_stain_key:
-        return {
-            "likely_organisms": "Enterobacteriaceae or Pseudomonas",
-            "empiric_therapy": [
-                "Ceftriaxone (standard Enterobacteriaceae coverage)",
-                "Piperacillin-Tazobactam or Meropenem (if Pseudomonas risk)",
-                "Add vancomycin if also covering Gram-positives",
-            ],
-            "key_differentiation": "Oxidase test, culture morphology",
-        }
-    elif "yeast" in gram_stain_key:
-        return {
-            "likely_organisms": "Candida spp.",
-            "empiric_therapy": [
-                "Echinocandin (Caspofungin, Micafungin, Anidulafungin)",
-                "Fluconazole (if low azole resistance risk)",
-            ],
-            "key_differentiation": "MALDI-TOF, germ tube test, species ID critical",
-        }
-    else:
-        return {
-            "likely_organisms": "Various - correlate with culture",
-            "empiric_therapy": ["Broad-spectrum coverage pending identification"],
-            "key_differentiation": "Await final culture and susceptibilities",
-        }
-
-
-# ─── Antibiotic Escalation Triggers ──────────────────────────────────────────
 
 def assess_escalation_triggers(
     organism: str,
@@ -391,99 +420,71 @@ def assess_escalation_triggers(
     susceptibility: Optional[Dict[str, str]] = None,
     patient_factors: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Assess whether antibiotic escalation is warranted.
+    """Flag review triggers without prescribing a regimen."""
+    _require_finite_nonnegative(ttp_hours, "TTP")
+    organism_key = _normalise_organism(organism)
+    triggers: List[Dict[str, str]] = []
 
-    Args:
-        organism: Identified organism
-        ttp_hours: Time to positivity
-        susceptibility: Dict of antibiotic -> S/I/R (optional)
-        patient_factors: Dict with clinical risk factors (optional)
-
-    Returns:
-        Dict with escalation assessment and recommendations
-    """
-    triggers = []
-    escalation_needed = False
-    organism_key = organism.lower().replace(" ", "_").replace(".", "")
-
-    # TTP-based triggers
     if ttp_hours < 12:
-        triggers.append({
-            "trigger": "RAPID_TTP",
-            "severity": "HIGH",
-            "detail": f"TTP of {ttp_hours:.1f}h indicates high bacterial burden",
-        })
-        escalation_needed = True
+        triggers.append(
+            {"trigger": "EARLY_POSITIVITY", "severity": "HIGH", "detail": f"TTP {ttp_hours:.1f} h"}
+        )
 
-    # Organism-based triggers
-    high_risk_organisms = [
-        "pseudomonas_aeruginosa", "acinetobacter_baumannii",
-        "candida", "staphylococcus_aureus", "enterococcus_faecium",
-    ]
-    for org in high_risk_organisms:
-        if org in organism_key:
-            triggers.append({
-                "trigger": "HIGH_RISK_ORGANISM",
+    high_priority = {
+        "pseudomonas_aeruginosa",
+        "acinetobacter_baumannii",
+        "candida",
+        "candida_albicans",
+        "candida_glabrata",
+        "staphylococcus_aureus",
+        "enterococcus_faecium",
+        "neisseria_meningitidis",
+    }
+    if organism_key in high_priority:
+        triggers.append(
+            {
+                "trigger": "HIGH_PRIORITY_ORGANISM",
                 "severity": "HIGH",
-                "detail": f"{organism} requires targeted therapy",
-            })
-            escalation_needed = True
-            break
+                "detail": f"{organism} warrants prompt organism-specific review",
+            }
+        )
 
-    # Resistance-based triggers
     if susceptibility:
-        resistant_count = sum(1 for v in susceptibility.values() if v.upper() == "R")
+        normalised = {str(k).lower(): str(v).upper() for k, v in susceptibility.items()}
+        resistant_count = sum(1 for value in normalised.values() if value == "R")
         if resistant_count >= 3:
-            triggers.append({
-                "trigger": "MULTI_DRUG_RESISTANT",
-                "severity": "CRITICAL",
-                "detail": f"Resistance to {resistant_count} antibiotics detected",
-            })
-            escalation_needed = True
+            triggers.append(
+                {
+                    "trigger": "MULTI_DRUG_RESISTANCE_SIGNAL",
+                    "severity": "CRITICAL",
+                    "detail": f"{resistant_count} reported resistant results",
+                }
+            )
+        if normalised.get("vancomycin") == "R":
+            triggers.append(
+                {
+                    "trigger": "VANCOMYCIN_RESISTANCE_REPORTED",
+                    "severity": "CRITICAL",
+                    "detail": "Verify organism, method, MIC/breakpoint, and local reporting rules",
+                }
+            )
 
-        # Check for specific resistance patterns
-        if susceptibility.get("ceftriaxone", "").upper() == "R":
-            triggers.append({
-                "trigger": "ESBL_POSSIBLE",
-                "severity": "HIGH",
-                "detail": "Ceftriaxone resistance - consider ESBL-producing organism",
-            })
-            escalation_needed = True
+    factors = patient_factors or {}
+    for key, label in (
+        ("immunocompromised", "IMMUNOCOMPROMISED_HOST"),
+        ("neutropenic", "NEUTROPENIA"),
+        ("septic_shock", "SEPTIC_SHOCK"),
+    ):
+        if factors.get(key):
+            triggers.append(
+                {
+                    "trigger": label,
+                    "severity": "CRITICAL" if key != "immunocompromised" else "HIGH",
+                    "detail": label.replace("_", " ").title(),
+                }
+            )
 
-        if susceptibility.get("vancomycin", "").upper() == "R":
-            triggers.append({
-                "trigger": "VRE_OR_VRSA",
-                "severity": "CRITICAL",
-                "detail": "Vancomycin resistance detected",
-            })
-            escalation_needed = True
-
-    # Patient factor-based triggers
-    if patient_factors:
-        if patient_factors.get("immunocompromised", False):
-            triggers.append({
-                "trigger": "IMMUNOCOMPROMISED_HOST",
-                "severity": "HIGH",
-                "detail": "Immunocompromised patient - lower threshold for escalation",
-            })
-            escalation_needed = True
-
-        if patient_factors.get("neutropenic", False):
-            triggers.append({
-                "trigger": "NEUTROPENIA",
-                "severity": "CRITICAL",
-                "detail": "Neutropenic patient - urgent broad-spectrum coverage needed",
-            })
-            escalation_needed = True
-
-        if patient_factors.get("septic_shock", False):
-            triggers.append({
-                "trigger": "SEPTIC_SHOCK",
-                "severity": "CRITICAL",
-                "detail": "Septic shock - immediate broad-spectrum therapy required",
-            })
-            escalation_needed = True
-
+    escalation_needed = bool(triggers)
     return {
         "organism": organism,
         "ttp_hours": ttp_hours,
@@ -491,14 +492,12 @@ def assess_escalation_triggers(
         "trigger_count": len(triggers),
         "triggers": triggers,
         "recommendation": (
-            "Escalate antimicrobial therapy immediately"
+            "Prompt clinical and microbiology review is indicated"
             if escalation_needed
-            else "Current therapy appears adequate; continue monitoring"
+            else "No heuristic escalation trigger detected; continue standard review"
         ),
     }
 
-
-# ─── Repeat Blood Culture Recommendations ────────────────────────────────────
 
 def recommend_repeat_cultures(
     organism: str,
@@ -509,99 +508,91 @@ def recommend_repeat_cultures(
     is_staphylococcus_aureus: bool = False,
     is_candida: bool = False,
 ) -> Dict[str, Any]:
-    """Recommend repeat blood cultures based on clinical context.
-
-    Args:
-        organism: Identified organism
-        ttp_hours: Time to positivity
-        classification: Contamination classification
-        day_of_positive_culture: Day number of positive culture
-        has_endovascular_hardware: Presence of prosthetic valve, pacemaker, etc.
-        is_staphylococcus_aureus: Whether organism is S. aureus
-        is_candida: Whether organism is Candida spp.
-
-    Returns:
-        Dict with repeat culture recommendations
-    """
-    recommendations = []
+    """Return selective follow-up-culture prompts."""
+    _require_finite_nonnegative(ttp_hours, "TTP")
+    organism_key = _normalise_organism(organism)
+    recs: List[Dict[str, str]] = []
     urgency = "ROUTINE"
-    repeat_interval_hours = None
+    repeat_interval_hours: Optional[int] = None
 
-    # S. aureus bacteremia - always repeat
-    if is_staphylococcus_aureus or "staphylococcus_aureus" in organism.lower():
-        recommendations.append({
-            "reason": "S. aureus bacteremia requires documentation of clearance",
-            "action": "Repeat blood cultures every 24-48h until negative",
-            "evidence": "IDSA guidelines for S. aureus bacteremia",
-        })
-        urgency = "URGENT"
-        repeat_interval_hours = 24
-
+    if is_staphylococcus_aureus or organism_key == "staphylococcus_aureus":
+        recs.append(
+            {
+                "reason": "S. aureus bloodstream infection",
+                "action": "Follow local S. aureus bacteremia clearance-culture protocol",
+                "evidence": "Organism-specific management practice",
+            }
+        )
+        urgency, repeat_interval_hours = "URGENT", 24
         if has_endovascular_hardware:
-            recommendations.append({
-                "reason": "Endovascular hardware with S. aureus bacteremia",
-                "action": "Repeat cultures q24h; minimum 4 weeks therapy; consider hardware removal",
-                "evidence": "AHA/IDSA endocarditis guidelines",
-            })
-
-    # Candidemia - always repeat
-    elif is_candida or "candida" in organism.lower():
-        recommendations.append({
-            "reason": "Candidemia requires documentation of clearance and ophthalmologic exam",
-            "action": "Repeat blood cultures every 24-48h until negative; fundoscopic exam",
-            "evidence": "IDSA candidiasis guidelines",
-        })
-        urgency = "URGENT"
-        repeat_interval_hours = 24
-
-    # Likely contaminant
+            recs.append(
+                {
+                    "reason": "Endovascular hardware present",
+                    "action": "Escalate endovascular-source assessment",
+                    "evidence": "Clinical risk factor",
+                }
+            )
+    elif is_candida or organism_key.startswith("candida"):
+        recs.append(
+            {
+                "reason": "Candidemia/fungemia",
+                "action": "Follow local candidemia clearance-culture and source-control protocol",
+                "evidence": "Organism-specific management practice",
+            }
+        )
+        urgency, repeat_interval_hours = "URGENT", 24
     elif classification == "LIKELY_CONTAMINANT":
-        recommendations.append({
-            "reason": "Likely contaminant - repeat cultures may help confirm",
-            "action": "Consider 1 set of repeat cultures if clinical uncertainty remains",
-            "evidence": "Clinical judgment",
-        })
+        recs.append(
+            {
+                "reason": "High heuristic contamination score",
+                "action": "Consider repeat peripheral cultures when clinical uncertainty remains",
+                "evidence": "Context-dependent confirmation",
+            }
+        )
         urgency = "LOW"
-        repeat_interval_hours = None
+    elif organism_key in {
+        "escherichia_coli",
+        "klebsiella_pneumoniae",
+        "pseudomonas_aeruginosa",
+        "enterobacter_cloacae",
+    }:
+        recs.append(
+            {
+                "reason": "Gram-negative bloodstream infection",
+                "action": "Use selective follow-up cultures for persistence risk, poor response, endovascular source, or resistant organisms",
+                "evidence": "Follow-up culture utility is context dependent",
+            }
+        )
+        urgency = "MODERATE"
 
-    # Gram-negative bacteremia
-    elif any(kw in organism.lower() for kw in ["e_coli", "klebsiella", "pseudomonas", "enterobacter"]):
-        if day_of_positive_culture <= 1:
-            recommendations.append({
-                "reason": "Gram-negative bacteremia - document clearance",
-                "action": "Repeat blood cultures in 48-72h if clinically indicated",
-                "evidence": "Standard practice",
-            })
-            urgency = "MODERATE"
-            repeat_interval_hours = 48
-
-    # Endocarditis concern
     if ttp_hours < 12:
-        recommendations.append({
-            "reason": "Rapid TTP raises concern for endocarditis",
-            "action": "Repeat blood cultures; consider echocardiography",
-            "evidence": "Clinical correlation with rapid TTP",
-        })
-        if urgency in ("ROUTINE", "LOW"):
+        recs.append(
+            {
+                "reason": "Early positivity",
+                "action": "Prioritise source assessment; TTP alone does not diagnose endocarditis",
+                "evidence": "TTP is supportive rather than diagnostic",
+            }
+        )
+        if urgency in {"ROUTINE", "LOW"}:
             urgency = "MODERATE"
 
-    if not recommendations:
-        recommendations.append({
-            "reason": "Standard follow-up",
-            "action": "Repeat cultures only if clinical deterioration or persistent fever",
-            "evidence": "Clinical judgment",
-        })
+    if not recs:
+        recs.append(
+            {
+                "reason": "No organism-specific repeat-culture rule encoded",
+                "action": "Use local guidance and clinical course",
+                "evidence": "Clinical judgement",
+            }
+        )
 
     return {
         "organism": organism,
         "urgency": urgency,
         "repeat_interval_hours": repeat_interval_hours,
-        "recommendations": recommendations,
-        "total_recommendations": len(recommendations),
+        "recommendations": recs,
+        "total_recommendations": len(recs),
     }
 
-
-# ─── Full Blood Culture Analysis ─────────────────────────────────────────────
 
 def analyze_blood_culture(
     organism: str,
@@ -612,245 +603,214 @@ def analyze_blood_culture(
     susceptibility: Optional[Dict[str, str]] = None,
     patient_factors: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Complete blood culture analysis combining all assessments.
+    """Run the combined heuristic analysis."""
+    _require_finite_nonnegative(ttp_hours, "TTP")
+    _validate_bottles(num_bottles_positive, num_bottles_total)
 
-    Args:
-        organism: Identified organism
-        ttp_hours: Time to positivity in hours
-        gram_stain: Gram stain result (optional)
-        num_bottles_positive: Number of positive bottles
-        num_bottles_total: Total bottles drawn
-        susceptibility: Antibiotic susceptibility data (optional)
-        patient_factors: Patient clinical factors (optional)
+    contamination = assess_contamination(
+        organism,
+        ttp_hours,
+        num_bottles_positive,
+        num_bottles_total,
+        gram_stain,
+    )
+    escalation = assess_escalation_triggers(organism, ttp_hours, susceptibility, patient_factors)
+    organism_key = _normalise_organism(organism)
 
-    Returns:
-        Comprehensive analysis dict
-    """
-    result = {
+    result: Dict[str, Any] = {
         "organism": organism,
         "ttp_hours": ttp_hours,
-        "analyses": {},
+        "analyses": {
+            "ttp": interpret_ttp(ttp_hours),
+            "contamination": contamination,
+            "escalation": escalation,
+            "repeat_cultures": recommend_repeat_cultures(
+                organism,
+                ttp_hours,
+                contamination["classification"],
+                is_staphylococcus_aureus=organism_key == "staphylococcus_aureus",
+                is_candida=organism_key.startswith("candida"),
+                has_endovascular_hardware=(patient_factors or {}).get("endovascular_hardware", False),
+            ),
+        },
+        "disclaimer": "Research/education heuristic; not a validated clinical prediction model.",
     }
-
-    # TTP interpretation
-    result["analyses"]["ttp"] = interpret_ttp(ttp_hours)
-
-    # Contamination assessment
-    result["analyses"]["contamination"] = assess_contamination(
-        organism, ttp_hours, num_bottles_positive, num_bottles_total, gram_stain
-    )
-
-    # Gram stain interpretation
     if gram_stain:
         result["analyses"]["gram_stain"] = interpret_gram_stain(gram_stain)
 
-    # Escalation triggers
-    result["analyses"]["escalation"] = assess_escalation_triggers(
-        organism, ttp_hours, susceptibility, patient_factors
-    )
-
-    # Repeat culture recommendations
-    is_saureus = "staphylococcus_aureus" in organism.lower() or "s._aureus" in organism.lower()
-    is_candida_sp = "candida" in organism.lower()
-    result["analyses"]["repeat_cultures"] = recommend_repeat_cultures(
-        organism, ttp_hours,
-        result["analyses"]["contamination"]["classification"],
-        is_staphylococcus_aureus=is_saureus,
-        is_candida=is_candida_sp,
-        has_endovascular_hardware=(patient_factors or {}).get("endovascular_hardware", False),
-    )
-
-    # Overall severity
-    severities = []
-    for analysis in result["analyses"].values():
-        if isinstance(analysis, dict):
-            for alert in analysis.get("alerts", []):
-                severities.append(alert.get("severity", "INFO"))
-
+    severities = [alert.get("severity", "INFO") for alert in contamination.get("alerts", [])]
+    severities += [trigger.get("severity", "INFO") for trigger in escalation.get("triggers", [])]
     if "CRITICAL" in severities:
         result["overall_severity"] = "CRITICAL"
-    elif "WARNING" in severities:
+    elif "HIGH" in severities or "WARNING" in severities:
         result["overall_severity"] = "WARNING"
     elif "ADVISORY" in severities:
         result["overall_severity"] = "ADVISORY"
     else:
         result["overall_severity"] = "INFO"
-
     return result
 
 
-# ─── CLI ──────────────────────────────────────────────────────────────────────
-
-def build_parser():
-    """Build the argument parser."""
-    p = argparse.ArgumentParser(
-        prog="blood-culture-sentinel",
-        description="Blood Culture Early Alert Agent"
+def _extract_ttp(row: Dict[str, str], row_number: int) -> float:
+    keys = (
+        "time_to_flag_positive_hours",
+        "time_to_flag_positive",
+        "ttp_hours",
+        "ttp",
+        "metric_primary",
     )
-    sub = p.add_subparsers(dest="cmd")
-
-    # TTP command
-    s_ttp = sub.add_parser("ttp", help="Interpret time-to-positivity")
-    s_ttp.add_argument("--hours", type=float, required=True, help="TTP in hours")
-
-    # Contamination command
-    s_contam = sub.add_parser("contamination", help="Assess contamination probability")
-    s_contam.add_argument("--organism", required=True, help="Organism name")
-    s_contam.add_argument("--ttp", type=float, required=True, help="TTP in hours")
-    s_contam.add_argument("--positive-bottles", type=int, default=1)
-    s_contam.add_argument("--total-bottles", type=int, default=2)
-
-    # Gram stain command
-    s_gs = sub.add_parser("gram-stain", help="Interpret Gram stain")
-    s_gs.add_argument("--result", required=True, help="Gram stain description")
-
-    # Full analysis command
-    s_full = sub.add_parser("analyze", help="Full blood culture analysis")
-    s_full.add_argument("--organism", required=True, help="Organism name")
-    s_full.add_argument("--ttp", type=float, required=True, help="TTP in hours")
-    s_full.add_argument("--gram-stain", help="Gram stain result")
-    s_full.add_argument("--positive-bottles", type=int, default=1)
-    s_full.add_argument("--total-bottles", type=int, default=2)
-    s_full.add_argument("--susceptibility", help="JSON of antibiotic:S/I/R pairs")
-    s_full.add_argument("--immunocompromised", action="store_true")
-    s_full.add_argument("--neutropenic", action="store_true")
-
-    # Batch command
-    s_batch = sub.add_parser("batch", help="Batch process CSV records of blood culture alerts")
-    s_batch.add_argument("-i", "--input", required=True, help="Input CSV file path")
-    s_batch.add_argument("-o", "--output", default="results.csv", help="Output CSV file path")
-
-    return p
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            try:
+                parsed = float(value)
+            except ValueError as exc:
+                raise ValueError(f"row {row_number}: invalid {key}={value!r}") from exc
+            _require_finite_nonnegative(parsed, f"row {row_number} TTP")
+            return parsed
+    raise ValueError(f"row {row_number}: no TTP field found")
 
 
-def main(argv=None):
-    """CLI entry point."""
-    p = build_parser()
-    args = p.parse_args(argv)
+def _computed_urgency(gram_stain: str, ttp_hours: float) -> str:
+    gram_key = _normalise_gram(gram_stain)
+    if ttp_hours < 12 or gram_key in {"gram_negative_rods", "gram_negative_diplococci", "yeast"}:
+        return "STAT"
+    if ttp_hours <= 24 or gram_key in {"gram_positive_cocci_clusters", "gram_positive_cocci_chains"}:
+        return "URGENT"
+    return "ROUTINE"
 
-    if args.cmd == "ttp":
-        result = interpret_ttp(args.hours)
-        print(json.dumps(result, indent=2))
-        return 0
 
-    elif args.cmd == "contamination":
-        result = assess_contamination(
-            args.organism, args.ttp, args.positive_bottles, args.total_bottles
-        )
-        print(json.dumps(result, indent=2))
-        return 0
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="blood-culture-early-alert-agent",
+        description="Blood-culture TTP and contamination heuristic utilities",
+    )
+    sub = parser.add_subparsers(dest="cmd")
 
-    elif args.cmd == "gram-stain":
-        result = interpret_gram_stain(args.result)
-        print(json.dumps(result, indent=2))
-        return 0
+    p_ttp = sub.add_parser("ttp", help="Interpret time-to-positivity")
+    p_ttp.add_argument("--hours", type=float, required=True)
 
-    elif args.cmd == "analyze":
-        patient_factors = {}
-        if args.immunocompromised:
-            patient_factors["immunocompromised"] = True
-        if args.neutropenic:
-            patient_factors["neutropenic"] = True
+    p_contam = sub.add_parser("contamination", help="Assess heuristic contamination score")
+    p_contam.add_argument("--organism", required=True)
+    p_contam.add_argument("--ttp", type=float, required=True)
+    p_contam.add_argument("--positive-bottles", type=int, default=1)
+    p_contam.add_argument("--total-bottles", type=int, default=2)
 
-        susceptibility = json.loads(args.susceptibility) if args.susceptibility else None
+    p_gram = sub.add_parser("gram-stain", help="Interpret Gram-stain morphology")
+    p_gram.add_argument("--result", required=True)
 
-        result = analyze_blood_culture(
-            organism=args.organism,
-            ttp_hours=args.ttp,
-            gram_stain=args.gram_stain,
-            num_bottles_positive=args.positive_bottles,
-            num_bottles_total=args.total_bottles,
-            susceptibility=susceptibility,
-            patient_factors=patient_factors if patient_factors else None,
-        )
-        print(json.dumps(result, indent=2))
-        return 0
+    p_analyse = sub.add_parser("analyze", help="Run combined analysis")
+    p_analyse.add_argument("--organism", required=True)
+    p_analyse.add_argument("--ttp", type=float, required=True)
+    p_analyse.add_argument("--gram-stain")
+    p_analyse.add_argument("--positive-bottles", type=int, default=1)
+    p_analyse.add_argument("--total-bottles", type=int, default=2)
+    p_analyse.add_argument("--susceptibility", help="JSON object of antibiotic: S/I/R values")
+    p_analyse.add_argument("--immunocompromised", action="store_true")
+    p_analyse.add_argument("--neutropenic", action="store_true")
+    p_analyse.add_argument("--septic-shock", action="store_true")
+    p_analyse.add_argument("--endovascular-hardware", action="store_true")
 
-    elif args.cmd == "batch":
-        with open(args.input, mode="r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            fieldnames = list(reader.fieldnames or [])
-            rows = list(reader)
+    p_batch = sub.add_parser("batch", help="Process CSV records")
+    p_batch.add_argument("-i", "--input", required=True)
+    p_batch.add_argument("-o", "--output", default="results.csv")
+    return parser
 
-        out_fields = fieldnames + [
-            "computed_urgency_escalation",
-            "time_to_positivity_category",
-            "empiric_antibiotic_advisory",
-            "likely_pathogens",
-            "critical_panic_call_window_minutes",
-        ]
-        # Preserve unique order
-        unique_out_fields = []
-        for field in out_fields:
-            if field not in unique_out_fields:
-                unique_out_fields.append(field)
 
-        out_rows = []
-        for r in rows:
-            # Extract fields with fallbacks
-            bottle_id = r.get("bottle_barcode", r.get("case_id", "UNKNOWN_BOTTLE"))
-            patient_id = r.get("patient_id", r.get("patient_synthetic_id", "UNKNOWN_PATIENT"))
-            gram_stain_raw = r.get("gram_stain_morphology", r.get("gram_stain", r.get("status_flag", "Unknown Gram Stain")))
-            
-            # Parse TTP
-            ttp_val = 24.0
-            for ttp_key in ["time_to_flag_positive_hours", "time_to_flag_positive", "ttp_hours", "ttp", "metric_primary"]:
-                if ttp_key in r and r[ttp_key]:
-                    try:
-                        ttp_val = float(r[ttp_key])
-                        break
-                    except ValueError:
-                        pass
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
-            # Existing or inferred alert level
-            input_urgency = r.get("critical_alert_escalation_level", "").upper()
+    try:
+        if args.cmd == "ttp":
+            print(json.dumps(interpret_ttp(args.hours), indent=2))
+            return 0
 
-            # Interpret Gram stain and TTP
-            gs_analysis = interpret_gram_stain(gram_stain_raw)
-            ttp_analysis = interpret_ttp(ttp_val)
+        if args.cmd == "contamination":
+            result = assess_contamination(
+                args.organism,
+                args.ttp,
+                args.positive_bottles,
+                args.total_bottles,
+            )
+            print(json.dumps(result, indent=2))
+            return 0
 
-            likely_orgs = gs_analysis.get("empiric_guidance", {}).get("likely_organisms", "")
-            if not likely_orgs and gs_analysis.get("expected_organisms"):
-                likely_orgs = ", ".join(gs_analysis["expected_organisms"][:3])
+        if args.cmd == "gram-stain":
+            print(json.dumps(interpret_gram_stain(args.result), indent=2))
+            return 0
 
-            empiric_therapies = gs_analysis.get("empiric_guidance", {}).get("empiric_therapy", ["Broad-spectrum empiric coverage"])
-            advisory_text = "; ".join(empiric_therapies)
+        if args.cmd == "analyze":
+            factors = {
+                key: True
+                for key in ("immunocompromised", "neutropenic", "septic_shock", "endovascular_hardware")
+                if getattr(args, key)
+            }
+            susceptibility = json.loads(args.susceptibility) if args.susceptibility else None
+            result = analyze_blood_culture(
+                organism=args.organism,
+                ttp_hours=args.ttp,
+                gram_stain=args.gram_stain,
+                num_bottles_positive=args.positive_bottles,
+                num_bottles_total=args.total_bottles,
+                susceptibility=susceptibility,
+                patient_factors=factors or None,
+            )
+            print(json.dumps(result, indent=2))
+            return 0
 
-            # Determine clinical escalation urgency
-            # Rapid TTP (<12h) or GNB/yeast/GPC in pairs/chains or high risk -> STAT
-            gs_lower = gram_stain_raw.lower()
-            if input_urgency in ["STAT", "URGENT", "ROUTINE"]:
-                final_urgency = input_urgency
-            else:
-                if ttp_val < 12.0 or "gram_negative" in gs_lower or "yeast" in gs_lower or "candida" in gs_lower or "chains" in gs_lower or "diplococci" in gs_lower:
-                    final_urgency = "STAT"
-                elif ttp_val <= 24.0 or "cluster" in gs_lower or "staph" in gs_lower:
-                    final_urgency = "Urgent"
-                else:
-                    final_urgency = "Routine"
+        if args.cmd == "batch":
+            with open(args.input, encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = list(reader.fieldnames or [])
+                rows = list(reader)
 
-            panic_call_window = 30 if final_urgency in ["STAT", "Urgent"] else 60
+            extra = [
+                "computed_urgency_escalation",
+                "time_to_positivity_category",
+                "empiric_antibiotic_advisory",
+                "likely_pathogens",
+                "critical_panic_call_window_minutes",
+            ]
+            output_fields = list(dict.fromkeys(fieldnames + extra))
+            output_rows: List[Dict[str, Any]] = []
 
-            row_dict = dict(r)
-            row_dict["computed_urgency_escalation"] = final_urgency
-            row_dict["time_to_positivity_category"] = ttp_analysis.get("category", "NORMAL_GROWTH")
-            row_dict["empiric_antibiotic_advisory"] = advisory_text
-            row_dict["likely_pathogens"] = likely_orgs or "Diverse bacteremia isolates"
-            row_dict["critical_panic_call_window_minutes"] = panic_call_window
+            for index, row in enumerate(rows, start=2):
+                gram_raw = (
+                    row.get("gram_stain_morphology")
+                    or row.get("gram_stain")
+                    or row.get("status_flag")
+                    or ""
+                )
+                ttp = _extract_ttp(row, index)
+                gram_analysis = interpret_gram_stain(gram_raw)
+                ttp_analysis = interpret_ttp(ttp)
+                urgency = _computed_urgency(gram_raw, ttp)
 
-            out_rows.append(row_dict)
+                output = dict(row)
+                output["computed_urgency_escalation"] = urgency
+                output["time_to_positivity_category"] = ttp_analysis["category"]
+                output["empiric_antibiotic_advisory"] = "; ".join(
+                    gram_analysis["empiric_guidance"]["empiric_therapy"]
+                )
+                output["likely_pathogens"] = gram_analysis["empiric_guidance"]["likely_organisms"]
+                output["critical_panic_call_window_minutes"] = 30 if urgency in {"STAT", "URGENT"} else 60
+                output_rows.append(output)
 
-        with open(args.output, mode="w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=unique_out_fields)
-            writer.writeheader()
-            writer.writerows(out_rows)
+            with open(args.output, "w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=output_fields)
+                writer.writeheader()
+                writer.writerows(output_rows)
 
-        print(f"Batch processed {len(out_rows)} blood culture records -> {args.output}")
-        return 0
+            print(f"Batch processed {len(output_rows)} blood culture records -> {args.output}")
+            return 0
 
-    else:
-        p.print_help()
+        parser.print_help()
         return 1
+
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
